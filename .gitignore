@@ -1,0 +1,16 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+
+# Environment variables
+.env
+
+# Virtual environment
+.venv/
+
+# IDE files
+.idea/
+*.iml
+
+# macOS files
+.DS_Store

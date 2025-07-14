@@ -1,68 +1,58 @@
 from flask import Blueprint, request, jsonify
-from .models import Car
-from . import db
-from .auth import auth
+from flask_httpauth import HTTPBasicAuth
+from werkzeug.security import check_password_hash
+from app.models import db, User, Car
+from sqlalchemy.exc import IntegrityError
 
-cars_bp = Blueprint('cars_bp', __name__)
+cars_bp = Blueprint('cars', __name__)
+auth = HTTPBasicAuth()
 
-@cars_bp.route('/', methods=['GET'])
+@auth.verify_password
+def verify_password(username, password):
+    user = User.query.filter_by(username=username).first()
+    if user and check_password_hash(user.password_hash, password):
+        return user
+    return None
+
+# Araç ekleme (sadece merchant rolü)
+@cars_bp.route('/cars', methods=['POST'])
+@auth.login_required
+def add_car():
+    current_user = auth.current_user()
+    if current_user.role != 'merchant':
+        return jsonify({'error': 'Sadece merchant kullanıcılar araç ekleyebilir'}), 403
+
+    data = request.get_json()
+    required_fields = ['brand', 'model', 'year']
+    if not all(field in data for field in required_fields):
+        return jsonify({'error': 'Eksik alanlar var'}), 400
+
+    try:
+        new_car = Car(
+            brand=data['brand'],
+            model=data['model'],
+            year=int(data['year']),
+            available=True
+        )
+        db.session.add(new_car)
+        db.session.commit()
+        return jsonify({'message': 'Araç başarıyla eklendi'}), 201
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'error': 'Veritabanı hatası'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+# Araç listeleme (herkes erişebilir)
+@cars_bp.route('/cars', methods=['GET'])
 def list_cars():
-    cars = Car.query.filter_by(available=True).all()
-    return jsonify([
-        {
+    cars = Car.query.all()
+    result = []
+    for car in cars:
+        result.append({
             'id': car.id,
-            'make': car.make,
+            'brand': car.brand,
             'model': car.model,
             'year': car.year,
             'available': car.available
-        }
-        for car in cars
-    ])
-
-@cars_bp.route('/', methods=['POST'])
-@auth.login_required
-def add_car():
-    user = auth.current_user()
-    if not user.is_merchant():
-        return jsonify({'error': 'Only merchants can add cars'}), 403
-
-    data = request.get_json()
-    car = Car(
-        make=data['make'],
-        model=data['model'],
-        year=data['year'],
-        available=True,
-        merchant_id=user.id
-    )
-    db.session.add(car)
-    db.session.commit()
-    return jsonify({'message': 'Car added'}), 201
-
-@cars_bp.route('/<int:car_id>', methods=['PUT'])
-@auth.login_required
-def update_car(car_id):
-    user = auth.current_user()
-    car = Car.query.get_or_404(car_id)
-
-    if car.merchant_id != user.id:
-        return jsonify({'error': 'You do not own this car'}), 403
-
-    data = request.get_json()
-    car.make = data.get('make', car.make)
-    car.model = data.get('model', car.model)
-    car.year = data.get('year', car.year)
-    db.session.commit()
-    return jsonify({'message': 'Car updated'})
-
-@cars_bp.route('/<int:car_id>', methods=['DELETE'])
-@auth.login_required
-def delete_car(car_id):
-    user = auth.current_user()
-    car = Car.query.get_or_404(car_id)
-
-    if car.merchant_id != user.id:
-        return jsonify({'error': 'You do not own this car'}), 403
-
-    db.session.delete(car)
-    db.session.commit()
-    return jsonify({'message': 'Car deleted'})
+        })
+    return jsonify(result), 200

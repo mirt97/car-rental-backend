@@ -1,55 +1,58 @@
 from flask import Blueprint, request, jsonify
-from .models import db, Rental, Car
-from .auth import auth
+from flask_httpauth import HTTPBasicAuth
+from werkzeug.security import check_password_hash
+from app.models import db, User, Car, Rental
 from datetime import datetime
+from sqlalchemy.exc import IntegrityError
 
-rentals_bp = Blueprint('rentals', __name__, url_prefix='/rentals')
+rentals_bp = Blueprint('rentals', __name__)
+auth = HTTPBasicAuth()
+
+@auth.verify_password
+def verify_password(username, password):
+    user = User.query.filter_by(username=username).first()
+    if user and check_password_hash(user.password_hash, password):
+        return user
+    return None
 
 @rentals_bp.route('/rent', methods=['POST'])
 @auth.login_required
 def rent_car():
+    current_user = auth.current_user()
+    if current_user.role != 'user':
+        return jsonify({'error': 'Sadece user rolündeki kullanıcılar araç kiralayabilir'}), 403
+
     data = request.get_json()
-    car_id = data.get('car_id')
+    required_fields = ['car_id', 'start_date', 'end_date']
+    if not all(field in data for field in required_fields):
+        return jsonify({'error': 'Eksik alanlar var'}), 400
 
-    car = Car.query.get(car_id)
-    if not car:
-        return jsonify({'error': 'Car not found'}), 404
-    if car.is_available is False:
-        return jsonify({'error': 'Car is already rented'}), 400
+    try:
+        car = Car.query.get(data['car_id'])
+        if not car or not car.available:
+            return jsonify({'error': 'Araç mevcut değil veya kiralanamaz durumda'}), 400
 
-    rental = Rental(user_id=auth.current_user().id, car_id=car_id, start_date=datetime.utcnow())
-    car.is_available = False
+        # Tarihleri doğrula
+        start_date = datetime.strptime(data['start_date'], "%Y-%m-%d").date()
+        end_date = datetime.strptime(data['end_date'], "%Y-%m-%d").date()
+        if start_date >= end_date:
+            return jsonify({'error': 'Başlangıç tarihi, bitiş tarihinden önce olmalı'}), 400
 
-    db.session.add(rental)
-    db.session.commit()
+        rental = Rental(
+            user_id=current_user.id,
+            car_id=car.id,
+            start_date=start_date,
+            end_date=end_date
+        )
 
-    return jsonify({'message': 'Car rented successfully'}), 200
+        car.available = False
+        db.session.add(rental)
+        db.session.commit()
 
-@rentals_bp.route('/return/<int:rental_id>', methods=['POST'])
-@auth.login_required
-def return_car(rental_id):
-    rental = Rental.query.get(rental_id)
-    if not rental or rental.user_id != auth.current_user().id:
-        return jsonify({'error': 'Rental not found'}), 404
+        return jsonify({'message': 'Araç başarıyla kiralandı'}), 201
 
-    if rental.end_date is not None:
-        return jsonify({'error': 'Car already returned'}), 400
-
-    rental.end_date = datetime.utcnow()
-    rental.car.is_available = True
-    db.session.commit()
-
-    return jsonify({'message': 'Car returned successfully'}), 200
-
-@rentals_bp.route('/my', methods=['GET'])
-@auth.login_required
-def my_rentals():
-    rentals = Rental.query.filter_by(user_id=auth.current_user().id).all()
-    return jsonify([
-        {
-            'rental_id': r.id,
-            'car_id': r.car_id,
-            'start_date': r.start_date.isoformat(),
-            'end_date': r.end_date.isoformat() if r.end_date else None
-        } for r in rentals
-    ])
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'error': 'Veritabanı hatası'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
